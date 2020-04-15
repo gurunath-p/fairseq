@@ -1,18 +1,17 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from collections import OrderedDict
 
 from fairseq import utils
-from fairseq.tasks.multilingual_translation import MultilingualTranslationTask
-
-from . import FairseqMultiModel, register_model, register_model_architecture
-
-from .transformer import (
+from fairseq.models import (
+    FairseqMultiModel,
+    register_model,
+    register_model_architecture,
+)
+from fairseq.models.transformer import (
     base_architecture,
     Embedding,
     TransformerModel,
@@ -57,6 +56,7 @@ class MultilingualTransformerModel(FairseqMultiModel):
     @classmethod
     def build_model(cls, args, task):
         """Build a new model instance."""
+        from fairseq.tasks.multilingual_translation import MultilingualTranslationTask
         assert isinstance(task, MultilingualTranslationTask)
 
         # make sure all arguments are present in older models
@@ -164,14 +164,14 @@ class MultilingualTransformerModel(FairseqMultiModel):
 
         return MultilingualTransformerModel(encoders, decoders)
 
-    def load_state_dict(self, state_dict, strict=True):
+    def load_state_dict(self, state_dict, strict=True, args=None):
         state_dict_subset = state_dict.copy()
         for k, _ in state_dict.items():
             assert k.startswith('models.')
             lang_pair = k.split('.')[1]
             if lang_pair not in self.models:
                 del state_dict_subset[k]
-        super().load_state_dict(state_dict_subset, strict=strict)
+        super().load_state_dict(state_dict_subset, strict=strict, args=args)
 
 
 @register_model_architecture('multilingual_transformer', 'multilingual_transformer')

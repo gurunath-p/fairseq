@@ -1,11 +1,23 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import torch.nn as nn
+from typing import List, NamedTuple, Optional
+from torch import Tensor
+
+EncoderOut = NamedTuple(
+    "EncoderOut",
+    [
+        ("encoder_out", Tensor),  # T x B x C
+        ("encoder_padding_mask", Tensor),  # B x T
+        ("encoder_embedding", Tensor),  # B x T x C
+        ("encoder_states", Optional[List[Tensor]]),  # List[T x B x C]
+        ("src_tokens", Optional[Tensor]),  # B x T
+        ("src_lengths", Optional[Tensor]),  # B x 1
+    ],
+)
 
 
 class FairseqEncoder(nn.Module):
@@ -15,7 +27,7 @@ class FairseqEncoder(nn.Module):
         super().__init__()
         self.dictionary = dictionary
 
-    def forward(self, src_tokens, src_lengths):
+    def forward(self, src_tokens, src_lengths=None, **kwargs):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape

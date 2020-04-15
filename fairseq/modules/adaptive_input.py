@@ -1,9 +1,7 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 
 import torch
@@ -41,10 +39,12 @@ class AdaptiveInput(nn.Module):
             size = self.cutoff[i] - prev
             dim = int(initial_dim // (factor ** i))
             seq = nn.Sequential(
-                nn.Embedding(size, dim, padding_idx),
+                nn.Embedding(size, dim, self.padding_idx),
                 nn.Linear(dim, output_dim, bias=False)
             )
             self.embeddings.append(seq)
+            self.padding_idx = None
+        self.padding_idx = padding_idx
 
         def init_weights(m):
             if isinstance(m, nn.Embedding):

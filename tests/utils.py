@@ -1,21 +1,21 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import argparse
 import torch
+import torch.nn.functional as F
 
 from fairseq import utils
 from fairseq.data import Dictionary
 from fairseq.data.language_pair_dataset import collate
 from fairseq.models import (
     FairseqEncoder,
+    FairseqEncoderDecoderModel,
     FairseqIncrementalDecoder,
-    FairseqModel,
 )
+from fairseq.models.fairseq_encoder import EncoderOut
 from fairseq.tasks import FairseqTask
 
 
@@ -154,7 +154,7 @@ class TestTranslationTask(FairseqTask):
         return self.tgt_dict
 
 
-class TestModel(FairseqModel):
+class TestModel(FairseqEncoderDecoderModel):
     def __init__(self, encoder, decoder):
         super().__init__(encoder, decoder)
 
@@ -170,11 +170,25 @@ class TestEncoder(FairseqEncoder):
         super().__init__(dictionary)
         self.args = args
 
-    def forward(self, src_tokens, src_lengths):
-        return src_tokens
+    def forward(self, src_tokens, src_lengths=None, **kwargs):
+        return EncoderOut(
+            encoder_out=src_tokens,
+            encoder_padding_mask=None,
+            encoder_embedding=None,
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
 
     def reorder_encoder_out(self, encoder_out, new_order):
-        return encoder_out.index_select(0, new_order)
+        return EncoderOut(
+            encoder_out=encoder_out.encoder_out.index_select(0, new_order),
+            encoder_padding_mask=None,
+            encoder_embedding=None,
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
 
 
 class TestIncrementalDecoder(FairseqIncrementalDecoder):
@@ -184,12 +198,12 @@ class TestIncrementalDecoder(FairseqIncrementalDecoder):
         args.max_decoder_positions = getattr(args, 'max_decoder_positions', 100)
         self.args = args
 
-    def forward(self, prev_output_tokens, encoder_out, incremental_state=None):
+    def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None):
         if incremental_state is not None:
             prev_output_tokens = prev_output_tokens[:, -1:]
         bbsz = prev_output_tokens.size(0)
         vocab = len(self.dictionary)
-        src_len = encoder_out.size(1)
+        src_len = encoder_out.encoder_out.size(1)
         tgt_len = prev_output_tokens.size(1)
 
         # determine number of steps
@@ -222,7 +236,7 @@ class TestIncrementalDecoder(FairseqIncrementalDecoder):
         attn = torch.rand(bbsz, tgt_len, src_len)
 
         dev = prev_output_tokens.device
-        return probs.to(dev), attn.to(dev)
+        return probs.to(dev), {"attn": [attn.to(dev)]}
 
     def get_normalized_probs(self, net_output, log_probs, _):
         # the decoder returns probabilities directly
@@ -234,3 +248,47 @@ class TestIncrementalDecoder(FairseqIncrementalDecoder):
 
     def max_positions(self):
         return self.args.max_decoder_positions
+
+
+class TestReshapingEncoder(FairseqEncoder):
+    def __init__(self, args, dictionary):
+        super().__init__(dictionary)
+        self.args = args
+
+    def forward(self, src_tokens, src_lengths=None, **kwargs):
+        b_sz, t_sz = src_tokens.shape
+        padding_needed = t_sz % 2
+        x = src_tokens
+        if padding_needed > 0:
+            padding_needed = 2 - padding_needed
+            x = F.pad(x, (0, padding_needed))
+
+        return EncoderOut(
+            encoder_out=x.view(b_sz, -1, 2),
+            encoder_padding_mask=None,
+            encoder_embedding=None,
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
+
+    def reorder_encoder_out(self, encoder_out, new_order):
+        return EncoderOut(
+            encoder_out=encoder_out.encoder_out.index_select(0, new_order),
+            encoder_padding_mask=None,
+            encoder_embedding=None,
+            encoder_states=None,
+            src_tokens=None,
+            src_lengths=None,
+        )
+
+
+class TestReshapingModel(FairseqEncoderDecoderModel):
+    def __init__(self, encoder, decoder):
+        super().__init__(encoder, decoder)
+
+    @classmethod
+    def build_model(cls, args, task):
+        encoder = TestReshapingEncoder(args, task.source_dictionary)
+        decoder = TestIncrementalDecoder(args, task.target_dictionary)
+        return cls(encoder, decoder)

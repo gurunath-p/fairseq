@@ -1,36 +1,39 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
-
-import os
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from collections import OrderedDict
+import itertools
+import logging
+import os
+
+import numpy as np
 
 from fairseq import tokenizer
-from fairseq.data.masked_lm_dictionary import MaskedLMDictionary
+from fairseq.data.legacy.masked_lm_dictionary import MaskedLMDictionary
 
 from fairseq.data import (
-    IndexedCachedDataset,
-    IndexedDataset,
-    IndexedRawTextDataset,
+    Dictionary,
+    ConcatDataset,
+    data_utils,
     TokenBlockDataset,
 )
-
-from fairseq.data import Dictionary
-from fairseq.data.masked_lm_dataset import MaskedLMDataset
+from fairseq.data.legacy.masked_lm_dataset import MaskedLMDataset
 from fairseq.data.multi_corpus_sampled_dataset import MultiCorpusSampledDataset
+from fairseq.tasks import FairseqTask, register_task
+from fairseq import utils
 
-from . import FairseqTask, register_task
+logger = logging.getLogger(__name__)
 
 
 @register_task('cross_lingual_lm')
 class CrossLingualLMTask(FairseqTask):
     """
     Task for training cross-lingual language models.
+
     For more details look at: https://arxiv.org/pdf/1901.07291.pdf
+
     Args:
         dictionary (Dictionary): the dictionary for the input of the task
     """
@@ -38,17 +41,14 @@ class CrossLingualLMTask(FairseqTask):
     @staticmethod
     def add_args(parser):
         """Add task-specific arguments to the parser."""
-        parser.add_argument('data', help='path to data directory')
+        parser.add_argument('data', help='colon separated path to data directories list, \
+                            will be iterated upon during epochs in round-robin manner')
         parser.add_argument('--tokens-per-sample', default=512, type=int,
                             help='max number of total tokens over all segments'
                                  ' per sample')
         parser.add_argument('--monolingual-langs', default='en', type=str,
                             help='comma separated list of languages for which we'
                                  ' want to train XLM on')
-        parser.add_argument('--raw-text', default=False, action='store_true',
-                            help='load raw text dataset')
-        parser.add_argument('--lazy-load', action='store_true',
-                            help='load the dataset lazily')
         parser.add_argument('--shuffle', action='store_true',
                             help='shuffle each monolingual dataset while'
                             ' training')
@@ -59,7 +59,6 @@ class CrossLingualLMTask(FairseqTask):
         self.seed = args.seed
         self.distributed_world_size = args.distributed_world_size
         self.langs2id = self._lang_to_id(args.monolingual_langs)
-        self.default_key = None
 
     def _lang_to_id(
             self,
@@ -74,7 +73,6 @@ class CrossLingualLMTask(FairseqTask):
         for id, lang in enumerate(langs):
             lang2id[lang] = id
         return lang2id
-
 
     @classmethod
     def load_dictionary(cls, filename):
@@ -94,53 +92,67 @@ class CrossLingualLMTask(FairseqTask):
 
     @classmethod
     def setup_task(cls, args, **kwargs):
-        """Setup the task.
-        """
+        """Setup the task."""
         dictionary = MaskedLMDictionary.load(os.path.join(args.data, 'dict.txt'))
-
-        print('| dictionary: {} types'.format(len(dictionary)))
-
+        logger.info('dictionary: {} types'.format(len(dictionary)))
         return cls(args, dictionary)
 
-    def load_dataset(self, split, combine=False):
+    def _load_single_lang_dataset(self, split, epoch):
+        loaded_datasets = []
+
+        paths = utils.split_paths(self.args.data)
+        assert len(paths) > 0
+        data_path = paths[(epoch - 1) % len(paths)]
+
+        for k in itertools.count():
+            split_k = split + (str(k) if k > 0 else '')
+            path = os.path.join(data_path, split_k)
+
+            ds = data_utils.load_indexed_dataset(path, self.dictionary, self.args.dataset_impl)
+            if ds is None:
+                if k > 0:
+                    break
+                else:
+                    raise FileNotFoundError('Dataset not found: {} ({})'.format(split, data_path))
+
+            # Since we append each block with the classification_token,
+            # we need to effectively create blocks of length
+            # tokens_per_sample-1
+            loaded_datasets.append(
+                TokenBlockDataset(
+                    ds, ds.sizes, self.args.tokens_per_sample - 1,
+                    pad=self.dictionary.pad(), eos=self.dictionary.eos(),
+                )
+            )
+
+            logger.info('{} {} {} examples'.format(data_path, split_k, len(loaded_datasets[-1])))
+
+        if len(loaded_datasets) == 1:
+            dataset = loaded_datasets[0]
+            sizes = dataset.sizes
+        else:
+            dataset = ConcatDataset(loaded_datasets)
+            sizes = np.concatenate([ds.sizes for ds in loaded_datasets])
+
+        return dataset, sizes
+
+    def load_dataset(self, split, epoch=1, combine=False, **kwargs):
         """Load a given dataset split.
+
         Args:
             split (str): name of the split (e.g., train, valid, test)
         """
         dataset_map = OrderedDict()
 
         for lang in self.langs2id.keys():
-            if self.default_key is None:
-                self.default_key = lang
             # Datasets are expected to be in "split.lang" format (Eg: train.en)
             language_split = '{}.{}'.format(split, lang)
-            path = os.path.join(self.args.data, language_split)
 
-            if self.args.raw_text and IndexedRawTextDataset.exists(path):
-                ds = IndexedRawTextDataset(path, self.dictionary)
-            elif not self.args.raw_text and IndexedDataset.exists(path):
-                if self.args.lazy_load:
-                    ds = IndexedDataset(path, fix_lua_indexing=True)
-                else:
-                    ds = IndexedCachedDataset(path, fix_lua_indexing=True)
-            else:
-                raise FileNotFoundError('Dataset not found: {} ({})'.format(
-                    language_split, self.args.data))
-
-            # Since we append each block with the classification_token,
-            # we need to effectively create blocks of length
-            # tokens_per_sample-1
-            block_dataset = TokenBlockDataset(
-                dataset=ds,
-                sizes=ds.sizes,
-                block_size=self.args.tokens_per_sample-1,
-                pad=self.dictionary.pad(),
-                eos=self.dictionary.eos()
-            )
+            block_dataset, sizes = self._load_single_lang_dataset(split=language_split, epoch=epoch)
 
             dataset_map[lang] = MaskedLMDataset(
                 dataset=block_dataset,
-                sizes=block_dataset.sizes,
+                sizes=sizes,
                 vocab=self.dictionary,
                 pad_idx=self.dictionary.pad(),
                 mask_idx=self.dictionary.mask(),
@@ -152,10 +164,7 @@ class CrossLingualLMTask(FairseqTask):
                 seed=self.seed,
             )
 
-        self.datasets[split] = MultiCorpusSampledDataset(
-            dataset_map, default_key=self.default_key
-        )
-        print('| {} {} {} examples'.format(
-            self.args.data, split, len(self.datasets[split])
-            )
+        self.datasets[split] = MultiCorpusSampledDataset(dataset_map)
+        logger.info('{} {} {} examples'.format(
+            utils.split_paths(self.args.data)[epoch - 1], split, len(self.datasets[split]))
         )

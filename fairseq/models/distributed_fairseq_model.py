@@ -1,19 +1,17 @@
-# Copyright (c) 2017-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the license found in the LICENSE file in
-# the root directory of this source tree. An additional grant of patent rights
-# can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 import inspect
-from torch.nn import parallel
+
+import torch.nn as nn
 
 from fairseq.legacy_distributed_data_parallel import LegacyDistributedDataParallel
+from fairseq.models import BaseFairseqModel
 
-from . import BaseFairseqModel
 
-
-def DistributedFairseqModel(args, model):
+def DistributedFairseqModel(args, model, process_group=None):
     """
     Wrap a *model* to support distributed data parallel training.
 
@@ -26,27 +24,30 @@ def DistributedFairseqModel(args, model):
         args (argparse.Namespace): fairseq args
         model (BaseFairseqModel): model to wrap
     """
-
     # determine which DDP class to extend
-    assert isinstance(model, BaseFairseqModel)
+    assert isinstance(model, nn.Module)
     if args.ddp_backend == 'c10d':
-        ddp_class = parallel.DistributedDataParallel
+        ddp_class = nn.parallel.DistributedDataParallel
         init_kwargs = dict(
             module=model,
             device_ids=[args.device_id],
             output_device=args.device_id,
-            broadcast_buffers=False,
+            broadcast_buffers=args.broadcast_buffers,
             bucket_cap_mb=args.bucket_cap_mb,
+            process_group=process_group,
         )
-        # Maintain backward compatibility for 0.4 or earlier
+        # Maintain backward compatibility
         if 'check_reduction' in inspect.getargspec(ddp_class)[0]:
             init_kwargs['check_reduction'] = True
+        if 'find_unused_parameters' in inspect.getargspec(ddp_class)[0]:
+            init_kwargs['find_unused_parameters'] = args.find_unused_parameters
     elif args.ddp_backend == 'no_c10d':
         ddp_class = LegacyDistributedDataParallel
         init_kwargs = dict(
             module=model,
             world_size=args.distributed_world_size,
             buffer_size=2**28,
+            process_group=process_group,
         )
     else:
         raise ValueError('Unknown --ddp-backend: ' + args.ddp_backend)
